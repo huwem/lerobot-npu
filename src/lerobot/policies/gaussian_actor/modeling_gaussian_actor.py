@@ -632,7 +632,11 @@ class RescaleFromTanh(Transform):
 
 class TanhMultivariateNormalDiag(TransformedDistribution):
     def __init__(self, loc, scale_diag, low=None, high=None):
-        base_dist = MultivariateNormal(loc, torch.diag_embed(scale_diag))
+        # For a diagonal matrix the Cholesky factor is element-wise sqrt.
+        # Computing it directly avoids torch.linalg.cholesky, which is not
+        # implemented on Ascend NPU for any dtype.
+        scale_tril = torch.diag_embed(scale_diag.sqrt())
+        base_dist = MultivariateNormal(loc, scale_tril=scale_tril)
 
         transforms = [TanhTransform(cache_size=1)]
 

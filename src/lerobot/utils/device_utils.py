@@ -30,6 +30,18 @@ def auto_select_torch_device() -> torch.device:
     elif torch.xpu.is_available():
         logging.info("Intel XPU backend detected, using xpu.")
         return torch.device("xpu")
+    elif getattr(torch, "npu", None) is not None:
+        # On some torch_npu versions is_available() returns False until the
+        # NPU is explicitly initialised.  device_count triggers that init.
+        try:
+            if torch.npu.device_count() > 0:
+                logging.info("Ascend NPU backend detected, using npu.")
+                return torch.device("npu")
+        except Exception:
+            pass
+        if torch.npu.is_available():
+            logging.info("Ascend NPU backend detected, using npu.")
+            return torch.device("npu")
     else:
         logging.warning("No accelerated backend detected. Using default cpu, this will be slow.")
         return torch.device("cpu")
@@ -94,16 +106,18 @@ def is_torch_device_available(try_device: str) -> bool:
         return torch.backends.mps.is_available()
     elif try_device == "xpu":
         return torch.xpu.is_available()
+    elif try_device == "npu":
+        return getattr(torch, "npu", None) is not None and torch.npu.is_available()
     elif try_device == "cpu":
         return True
     else:
-        raise ValueError(f"Unknown device {try_device}. Supported devices are: cuda, mps, xpu or cpu.")
+        raise ValueError(f"Unknown device {try_device}. Supported devices are: cuda, mps, xpu, npu or cpu.")
 
 
 def is_amp_available(device: str):
     if device in ["cuda", "xpu", "cpu"]:
         return True
-    elif device == "mps":
+    elif device in ["mps", "npu"]:
         return False
     else:
         raise ValueError(f"Unknown device '{device}.")
