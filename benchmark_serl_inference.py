@@ -16,7 +16,6 @@ from typing import Any
 
 import numpy as np
 import torch
-import torch.distributions as dist
 from safetensors.torch import load_file
 from torch import Tensor
 
@@ -28,25 +27,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 BENCHMARK_ARGS: argparse.Namespace | None = None
-
-
-# ---------------------------------------------------------------------------
-# NPU configuration (must run before any model construction)
-# ---------------------------------------------------------------------------
-def _configure_npu() -> None:
-    """Apply Ascend NPU workarounds that must be set early.
-
-    - Disable distribution validation: ``cholesky_ex`` is not implemented.
-    - Disable internal tensor format optimisation to avoid as_strided
-      warnings and silent precision drift.
-    """
-    dist.Distribution.set_default_validate_args(False)
-
-    if getattr(torch, "npu", None) is not None:
-        torch.npu.config.allow_internal_format = False
-
-
-_configure_npu()
 
 
 # ---------------------------------------------------------------------------
@@ -230,44 +210,12 @@ def _load_and_remap_state_dict(policy_path: str) -> dict[str, torch.Tensor]:
 
 
 # ---------------------------------------------------------------------------
-# NPU: FP16 image encoder wrapper
-# ---------------------------------------------------------------------------
-class FloatInHalfOutImageEncoder(torch.nn.Module):
-    """Wrap an image encoder so it runs internally in FP16 but exposes FP32.
-
-    On Ascend 310B the pooling kernel ``MaxPoolWithArgmaxV1`` only supports
-    FP16, so the image encoder must run in half-precision.  The rest of the
-    policy stays in FP32 for numerical stability.
-    """
-
-    def __init__(self, encoder: torch.nn.Module) -> None:
-        super().__init__()
-        self.encoder = encoder.half()
-
-    def forward(self, x: Tensor) -> Tensor:
-        return self.encoder(x.half()).float()
-
-
-def _convert_image_encoders_to_fp16(policy) -> None:
-    """Replace every image encoder in *policy* with FP16-in/FP32-out wrappers."""
-    actor_enc = policy.actor.encoder
-    if hasattr(actor_enc, "image_encoder") and actor_enc.image_encoder is not None:
-        actor_enc.image_encoder = FloatInHalfOutImageEncoder(actor_enc.image_encoder)
-
-    discrete_critic = getattr(policy, "discrete_critic", None)
-    if discrete_critic is not None:
-        critic_enc = discrete_critic.encoder
-        if hasattr(critic_enc, "image_encoder") and critic_enc.image_encoder is not None:
-            critic_enc.image_encoder = FloatInHalfOutImageEncoder(critic_enc.image_encoder)
-
-
-# ---------------------------------------------------------------------------
 # Top-level runner
 # ---------------------------------------------------------------------------
 def run_benchmark(
     cfg: TrainRLServerPipelineConfig, *, pure_model: bool, n_iters: int
 ) -> dict[str, Any]:
-    """Build the policy, load weights, apply NPU tweaks, and run benchmarks."""
+    """Build the policy, load weights, and run benchmarks."""
     cfg.validate()
 
     policy_path = None
@@ -296,13 +244,6 @@ def run_benchmark(
             logger.warning(f"Unexpected key(s): {unexpected}")
         if not real_missing and not unexpected:
             logger.info("Checkpoint loaded cleanly after remap.")
-
-    # On Ascend 310B, pooling ops (MaxPoolWithArgmaxV1) only support FP16,
-    # so image encoders run in half-precision.  The rest of the policy stays
-    # FP32 for numerical stability.
-    if str(cfg.policy.device) == "npu":
-        logger.info("Converting image encoders to FP16 for NPU compatibility.")
-        _convert_image_encoders_to_fp16(policy)
 
     if pure_model:
         return benchmark_pure_model(policy, n_iters=n_iters)
